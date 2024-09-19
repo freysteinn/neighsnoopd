@@ -117,6 +117,284 @@ static void __pr_std(FILE * file, const char *format, ...)
         __pr_debug("DEBUG: [%-10.10s:%d] " fmt, __func__, __LINE__, ##__VA_ARGS__); \
     } while (0)
 
+// Prints netlink messages wihout prefix
+#define __pr_nl(fmt, ...)                     \
+    do {                                      \
+        if (!env.netlink)                     \
+            break;                            \
+        __pr_std(stderr, fmt, ##__VA_ARGS__); \
+    } while (0)
+
+
+// Prints netlink messages with function and line number
+#define pr_nl(fmt, ...)                                            \
+    do {                                                           \
+        __pr_nl("NETLINK: [%-10.10s:%d] " fmt, __func__, __LINE__, \
+                ##__VA_ARGS__);                                    \
+    } while (0)
+
+
+static int pr_nl_attr_neigh(const struct nlattr *attr, void *data)
+{
+    int type = mnl_attr_get_type(attr);
+    __u8 mac_str[MAC_ADDR_STR_LEN];
+    __u16 vlanid;
+
+    __pr_nl(">  [ATTR %d] %d octets", mnl_attr_get_type(attr),
+             mnl_attr_get_len(attr));
+    switch (type) {
+        case NDA_UNSPEC:
+            __pr_nl(" <UNSPEC>");
+            break;
+        case NDA_DST:
+            __pr_nl(" <DST> IP: %s",
+                     inet_ntoa(*(struct in_addr *)mnl_attr_get_payload(attr)));
+            break;
+        case NDA_LLADDR:
+            if (mnl_attr_get_len(attr) >= ETH_ALEN) {
+                mac_to_string(mac_str, mnl_attr_get_payload(attr), sizeof(mac_str));
+                __pr_nl(" <LLADDR> MAC: %s", mac_str);
+            } else {
+                __pr_nl(" <LLADDR>");
+            }
+            break;
+        case NDA_CACHEINFO:
+            __pr_nl(" <CACHEINFO>");
+            break;
+        case NDA_PROBES:
+            __pr_nl(" <PROBES>");
+            break;
+        case NDA_VLAN:
+            __pr_nl(" <VLAN> LAN ID: %d", mnl_attr_get_u16(attr));
+            break;
+        case NDA_PORT:
+            __pr_nl(" <PORT> PORT: %d", mnl_attr_get_u16(attr));
+            break;
+        case NDA_VNI:
+            __pr_nl(" <VNI> VNI: %d", mnl_attr_get_u32(attr));
+            break;
+        case NDA_IFINDEX:
+            __pr_nl(" <IFINDEX> IFINDEX: %d", mnl_attr_get_u32(attr));
+            break;
+        case NDA_MASTER:
+            __pr_nl(" <MASTER>");
+            break;
+        case NDA_LINK_NETNSID:
+            __pr_nl(" <LINK_NETNSID>");
+            break;
+        case NDA_SRC_VNI:
+            __pr_nl(" <SRC_VNI> SRC_VNI: %d", mnl_attr_get_u32(attr));
+            break;
+        case NDA_PROTOCOL:
+            __pr_nl(" <PROTOCOL> PROTOCOL: %d", mnl_attr_get_u32(attr));
+            break;
+        case NDA_NH_ID:
+            __pr_nl(" <NH_ID>");
+            break;
+        case NDA_FDB_EXT_ATTRS:
+            __pr_nl(" <FDB_EXT_ATTRS>");
+            break;
+        case NDA_FLAGS_EXT:
+            __pr_nl(" <FLAGS_EXT>");
+            break;
+        case NDA_NDM_STATE_MASK:
+            __pr_nl(" <NDM_STATE_MASK>");
+            break;
+        case NDA_NDM_FLAGS_MASK:
+            __pr_nl(" <NDM_FLAGS_MASK>");
+            break;
+        default:
+            __pr_nl(" <UNKNOWN(%d)>", type);
+            break;
+    }
+    __pr_nl("\n");
+
+    return MNL_CB_OK;
+}
+
+static int pr_nl_neigh_ndm(const struct nlmsghdr *nlh)
+{
+    struct ndmsg *ndm = mnl_nlmsg_get_payload(nlh);
+
+    __pr_nl(">  [NEIGHBOR Header] %d octets\n", nlh->nlmsg_len);
+    __pr_nl(">    .ndm_family = %d\n", ndm->ndm_family);
+    __pr_nl(">    .ndm_ifindex = %d\n", ndm->ndm_ifindex);
+    __pr_nl(">    .ndm_state = <");
+    unsigned states = nlh->nlmsg_flags;
+    while (states) {
+        int bit_pos = __builtin_ctzll(states);
+        int state = 1 << bit_pos;
+        if (state & NLM_F_REQUEST)
+            __pr_nl("REQUEST");
+        if (state & NLM_F_MULTI)
+            __pr_nl("MULTI");
+        if (state & NLM_F_ACK)
+            __pr_nl("ACK");
+        if (state & NLM_F_ECHO)
+            __pr_nl("ECHO");
+        if (state & NLM_F_DUMP_INTR)
+            __pr_nl("DUMP_INTR");
+        if (state & NLM_F_DUMP_FILTERED)
+            __pr_nl("DUMP_FILTERED");
+        if (state >= NLM_F_DUMP_FILTERED)
+            __pr_nl("UNKNOWN(0x%x)", state);
+        if (__builtin_popcountll(states) > 1)
+            __pr_nl(",");
+        states &= (states - 1);
+    }
+    __pr_nl(">\n");
+    __pr_nl(">    .ndm_flags = %d <", ndm->ndm_flags);
+    unsigned flags = nlh->nlmsg_flags;
+    while (flags) {
+        int bit_pos = __builtin_ctzll(flags);
+        int flag = 1 << bit_pos;
+        if (flag & NTF_USE)
+                __pr_nl("USE");
+        if (flag & NTF_SELF)
+            __pr_nl("SELF");
+        if (flag & NTF_MASTER)
+            __pr_nl("MASTER");
+        if (flag & NTF_PROXY)
+            __pr_nl("PROXY");
+        if (flag & NTF_EXT_LEARNED)
+            __pr_nl("EXT_LEARNED");
+        if (flag & NTF_OFFLOADED)
+            __pr_nl("OFFLOADED");
+        if (flag & NTF_STICKY)
+            __pr_nl("STICKY");
+        if (flag & NTF_ROUTER)
+            __pr_nl("ROUTER");
+        if (flag > NTF_ROUTER)
+            __pr_nl("UNKNOWN(0x%x)", flag);
+
+        if (__builtin_popcountll(flags) > 1)
+            __pr_nl(",");
+        flags &= (flags - 1);
+    }
+    __pr_nl(">\n");
+    __pr_nl(">    .ndm_type = %d\n", ndm->ndm_type);
+
+    mnl_attr_parse(nlh, sizeof(*ndm), pr_nl_attr_neigh, NULL);
+
+    return MNL_CB_OK;
+}
+
+static int pr_nl_attr(const struct nlattr *attr, void *data)
+{
+    pr_nl(">  [ATTR %d] %d octets", mnl_attr_get_type(attr),
+             mnl_attr_get_len(attr));
+    for (int i = 0; i < mnl_attr_get_len(attr); i++) {
+        if (i % 16 == 0)
+            __pr_nl("  ");
+        __pr_nl("%02x ", ((unsigned char *)mnl_attr_get_payload(attr))[i]);
+        if (i % 16 == 15)
+            __pr_nl("\n>");
+    }
+    __pr_nl("\n");
+    return MNL_CB_OK;
+}
+
+static int pr_nl_ndm(const struct nlmsghdr *nlh)
+{
+    struct ndmsg *ndm = mnl_nlmsg_get_payload(nlh);
+
+    if (nlh->nlmsg_type == NLMSG_ERROR) {
+        struct nlmsgerr *err = mnl_nlmsg_get_payload(nlh);
+        __pr_nl(">  [ERROR] ", err->error);
+        __pr_nl(">    .error = %d\n", err->error);
+        __pr_nl(">    .msg = %s\n", strerror(-err->error));
+        return MNL_CB_OK;
+    }
+    __pr_nl(">  [PAYLOAD] %d octets\n", nlh->nlmsg_len);
+    __pr_nl(">");
+    for (int i = 0; i < nlh->nlmsg_len; i++) {
+        if (i % 16 == 0)
+            __pr_nl("  ");
+        __pr_nl("%02x ", ((unsigned char *)nlh)[i]);
+        if (i % 16 == 15)
+            __pr_nl("\n>");
+    }
+    __pr_nl("\n");
+
+    mnl_attr_parse(nlh, sizeof(*ndm), pr_nl_attr, NULL);
+
+    return MNL_CB_OK;
+}
+
+static void pr_nl_nlmsg(struct nlmsghdr *nlh, __u32 seq)
+{
+    int ret;
+
+    if (!env.netlink)
+        return;
+
+    __pr_nl(">----------- BEGIN NETLINK MESSAGE -----------\n");
+    __pr_nl(">  [NETLINK Header ] %d octets\n", nlh->nlmsg_len);
+
+    __pr_nl(">    .nlmsg_len = %d\n", nlh->nlmsg_len);
+    __pr_nl(">    .type = %d <", nlh->nlmsg_type, nlh->nlmsg_type);
+    switch (nlh->nlmsg_type) {
+        case NLMSG_NOOP:
+            __pr_nl("NOOP");
+            break;
+        case NLMSG_ERROR:
+            __pr_nl("ERROR");
+            break;
+        case NLMSG_DONE:
+            __pr_nl("DONE");
+            break;
+        case NLMSG_OVERRUN:
+            __pr_nl("OVERRUN");
+            break;
+        case RTM_NEWNEIGH:
+            __pr_nl("NEWNEIGH");
+            break;
+        case RTM_GETNEIGH:
+            __pr_nl("GETNEIGH");
+            break;
+        default:
+            __pr_nl("UNKNOWN(%d)", nlh->nlmsg_type);
+            break;
+    }
+    __pr_nl(">\n");
+    __pr_nl(">    .flags = %d <", nlh->nlmsg_flags, nlh->nlmsg_flags);
+    unsigned flags = nlh->nlmsg_flags;
+    while (flags) {
+        int bit_pos = __builtin_ctzll(flags);
+        int flag = 1 << bit_pos;
+        if (flag & NLM_F_REQUEST)
+            __pr_nl("REQUEST");
+        if (flag & NLM_F_MULTI)
+            __pr_nl("MULTI");
+        if (flag & NLM_F_ACK)
+            __pr_nl("ACK");
+        if (flag & NLM_F_ECHO)
+            __pr_nl("ECHO");
+        if (flag & NLM_F_DUMP_INTR)
+            __pr_nl("DUMP_INTR");
+        if (flag & NLM_F_DUMP_FILTERED)
+            __pr_nl("DUMP_FILTERED");
+        if (flag >= NLM_F_DUMP_FILTERED)
+            __pr_nl("UNKNOWN(0x%x)", flag);
+        if (__builtin_popcountll(flags) > 1)
+            __pr_nl(",");
+        flags &= (flags - 1);
+    }
+    __pr_nl(">\n");
+    __pr_nl(">    .seq = %d\n", nlh->nlmsg_seq);
+    __pr_nl(">    .port = %d\n", nlh->nlmsg_pid);
+
+    if (nlh->nlmsg_type == RTM_NEWNEIGH || nlh->nlmsg_type == RTM_GETNEIGH)
+        ret = pr_nl_neigh_ndm(nlh);
+    else
+        ret = pr_nl_ndm(nlh);
+    if (ret <= MNL_CB_ERROR) {
+        pr_nl(">>>error parsing netlink message<<<\n");
+        return;
+    }
+    __pr_nl(">-----------  END NETLINK MESSAGE  -----------\n");
+}
+
 static int getneigh_attr_cb(const struct nlattr *attr, void *data)
 {
     const struct nlattr **tb = data;
@@ -164,6 +442,7 @@ static int getneigh_find_mac_cb(const struct nlmsghdr *nlh, void *data)
     if (nlh->nlmsg_type == NLMSG_DONE)
         return MNL_CB_STOP;
 
+
     if (nlh->nlmsg_type != RTM_NEWNEIGH)
         return MNL_CB_OK;
 
@@ -203,6 +482,9 @@ static bool is_mac_local(const __u8 *mac_addr)
     ndm = mnl_nlmsg_put_extra_header(nlh, sizeof(*ndm));
     ndm->ndm_family = AF_BRIDGE;
 
+    pr_nl("sending netlink message\n");
+    pr_nl_nlmsg(nlh, nlm_seq);
+
     // Send Netlink request to fetch FDB entries
     if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
         pr_err(errno, "mnl_socket_sendto");
@@ -211,6 +493,9 @@ static bool is_mac_local(const __u8 *mac_addr)
 
     // Parse the response
     while ((ret = mnl_socket_recvfrom(nl, buf, sizeof(buf))) > 0) {
+        pr_nl("received netlink message\n");
+        pr_nl_nlmsg((struct nlmsghdr *)buf, nlm_seq);
+
         ret = mnl_cb_run(buf, ret, nlm_seq, mnl_portid, getneigh_find_mac_cb,
                          &lookup);
 
@@ -277,6 +562,9 @@ static int add_neigh(struct arp_reply *arp_reply, int dest_ifindex)
     pr_debug("- IP address: %s\n", inet_ntoa(arp_reply->ip));
     pr_debug("- MAC address: %s\n", mac_str);
 
+    pr_nl("sending netlink message\n");
+    pr_nl_nlmsg(nlh, nlm_seq);
+
     // Send Netlink request update neigh table
     if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
         pr_err(errno, "mnl_socket_sendto");
@@ -289,6 +577,9 @@ static int add_neigh(struct arp_reply *arp_reply, int dest_ifindex)
         pr_err(errno, "mnl_socket_recvfrom");
         goto out;
     }
+
+    pr_nl("%s(%d): received netlink message\n");
+    pr_nl_nlmsg((struct nlmsghdr *)buf, nlm_seq);
 
     err = mnl_cb_run(buf, ret, nlm_seq, mnl_portid,
                      NULL, NULL);
@@ -418,6 +709,8 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
             argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
             break;
         case 'v':
+            if (env.debug)
+                env.netlink = true;
             if (env.verbose)
                 env.debug = true;
             env.verbose = true;
@@ -481,6 +774,7 @@ int main(int argc, char **argv)
         goto cleanup1;
     }
     mnl_portid = mnl_socket_get_portid(nl);
+    pr_nl("MNL port ID: %d\n", mnl_portid);
 
     if (mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) < 0) {
         err = -errno;
