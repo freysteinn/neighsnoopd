@@ -39,6 +39,7 @@ static struct env {
     regex_t regex_filter;
     bool has_filter;
     bool is_xdp;
+    bool disable_macvlan_filter;
     bool verbose;
     bool debug;
     bool netlink;
@@ -62,6 +63,7 @@ static const struct argp_option opts[] = {
     { "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
     { "filter", 'f', "REGEXP", 0,
       "Regular expression to exclude interfaces from program", 0 },
+    { "macvlan", 'm', NULL, 0, "Disable macvlan fitering", 0 },
     { "xdp", 'x', NULL, 0, "Attach XDP instead of TC", 0},
     { NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help", 0 },
     {},
@@ -711,6 +713,54 @@ static int getlink_get_ifdevs_cb(const struct nlmsghdr *nlh, void *data)
     return MNL_CB_OK;
 }
 
+static bool check_ifindex_is_macvlan(int ifindex)
+{
+    char buf[MNL_SOCKET_BUFFER_SIZE];
+    struct nlmsghdr *nlh;
+    struct ifinfomsg *ifm;
+    int ret;
+
+    bool is_macvlan = false;
+    if (env.disable_macvlan_filter)
+        goto out;
+
+    nlh = mnl_nlmsg_put_header(buf);
+    nlh->nlmsg_type = RTM_GETLINK;
+    nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    nlh->nlmsg_seq = ++nlm_seq;
+
+    ifm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ifinfomsg));
+    ifm->ifi_family = AF_UNSPEC;
+    ifm->ifi_index = ifindex;
+
+    pr_nl("sending netlink message\n");
+    pr_nl_nlmsg(nlh, nlm_seq);
+
+    // Send Netlink request update neigh table
+    if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
+        pr_err(errno, "mnl_socket_sendto");
+        goto out;
+    }
+
+    pr_nl("%s(%d): received netlink message\n");
+    pr_nl_nlmsg((struct nlmsghdr *)buf, nlm_seq);
+
+    ret = mnl_cb_run(buf, ret, nlm_seq, mnl_portid, getneigh_find_mac_cb,
+                     &is_macvlan);
+
+    while ((ret = mnl_socket_recvfrom(nl, buf, sizeof(buf))) > 0) {
+        ret = mnl_cb_run(buf, ret, nlm_seq, mnl_portid, getlink_get_ifdevs_cb,
+                         &is_macvlan);
+        if (ret <= 0)
+            break;
+    }
+    if (ret < 0)
+        pr_err(errno, "mnl_cb_run");
+
+out:
+    return is_macvlan;
+}
+
 // Callback function to handle data from the ring buffer
 static int handle_arp_reply(void *ctx, void *data, size_t data_sz)
 {
@@ -731,6 +781,10 @@ static int handle_arp_reply(void *ctx, void *data, size_t data_sz)
     }
     if (strlen(ifname) && filter_interfaces(ifname)) {
         pr_debug("Interface '%s' matches regexp filter: filtered\n", ifname);
+        return 1;
+    }
+    if (check_ifindex_is_macvlan(dest_ifindex)) {
+        pr_debug("Interface '%s' is a macvlan: filtered\n", ifname);
         return 1;
     }
     if (!is_mac_local(arp_reply->mac)) {
@@ -783,6 +837,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
             break;
         case 'x':
             env.is_xdp = true;
+            break;
+        case 'm':
+            env.disable_macvlan_filter = true;
             break;
         case ARGP_KEY_NO_ARGS:
             fprintf(stderr, "Missing network device <IFNAME_MON>\n");
