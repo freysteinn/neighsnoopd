@@ -35,6 +35,9 @@
 
 static struct env {
     int ifidx_mon;
+    char *regexp_filter_ifname;
+    regex_t regex_filter;
+    bool has_filter;
     bool is_xdp;
     bool verbose;
     bool debug;
@@ -57,6 +60,8 @@ const char argp_program_doc[] =
 
 static const struct argp_option opts[] = {
     { "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
+    { "filter", 'f', "REGEXP", 0,
+      "Regular expression to exclude interfaces from program", 0 },
     { "xdp", 'x', NULL, 0, "Attach XDP instead of TC", 0},
     { NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help", 0 },
     {},
@@ -658,6 +663,54 @@ static int find_ifindex_from_ip(struct in_addr *given_ip, char *ifname,
     return ret_ifindex;
 }
 
+static bool filter_interfaces(char *ifname)
+{
+    int ret;
+    if (!env.has_filter)
+        return false;
+
+    ret = regexec(&env.regex_filter, ifname, 0, NULL, 0);
+    if (ret)
+        return false;
+
+    pr_debug("Filtered interface %s using filter: '%s'\n", ifname,
+             env.regexp_filter_ifname);
+    return true;
+}
+
+static int getlink_get_ifdevs_cb(const struct nlmsghdr *nlh, void *data)
+{
+    bool *is_macvlan = data;
+    struct ifinfomsg *ifinfo = mnl_nlmsg_get_payload(nlh);
+    struct nlattr *attr;
+    char kind[IFNAMSIZ] = {0};
+
+    // Loop through all attributes of the netlink message
+    mnl_attr_for_each(attr, nlh, sizeof(*ifinfo)) {
+        int type = mnl_attr_get_type(attr);
+
+        // Skip unsupported attributes
+        if (mnl_attr_type_valid(attr, IFLA_MAX) < 0)
+            continue;
+
+        // Parse nested attributes for the link info
+        if (type == IFLA_LINKINFO) {
+            struct nlattr *link_attr;
+            mnl_attr_for_each_nested(link_attr, attr) {
+                if (mnl_attr_get_type(link_attr) == IFLA_INFO_KIND)
+                    snprintf(kind, sizeof(kind), "%s",
+                             mnl_attr_get_str(link_attr));
+            }
+        }
+    }
+
+    // Check if the interface is a macvlan
+    if (strcmp(kind, "macvlan") == 0) {
+        *is_macvlan = true;
+    }
+    return MNL_CB_OK;
+}
+
 // Callback function to handle data from the ring buffer
 static int handle_arp_reply(void *ctx, void *data, size_t data_sz)
 {
@@ -674,6 +727,10 @@ static int handle_arp_reply(void *ctx, void *data, size_t data_sz)
 
     if (dest_ifindex < 0) {
         pr_debug("No interface mached destination: filtered\n");
+        return 1;
+    }
+    if (strlen(ifname) && filter_interfaces(ifname)) {
+        pr_debug("Interface '%s' matches regexp filter: filtered\n", ifname);
         return 1;
     }
     if (!is_mac_local(arp_reply->mac)) {
@@ -714,6 +771,15 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
             if (env.verbose)
                 env.debug = true;
             env.verbose = true;
+            break;
+        case 'f':
+            if (strlen(arg) == 0) {
+                fprintf(stderr, "Invalid filter\n");
+                argp_usage(state);
+                exit(EXIT_FAILURE);
+            }
+            env.regexp_filter_ifname = arg;
+            env.has_filter = true;
             break;
         case 'x':
             env.is_xdp = true;
@@ -764,6 +830,15 @@ int main(int argc, char **argv)
     err = argp_parse(&argp, argc, argv, 0, NULL, NULL);
     if (err)
         goto cleanup1;
+
+    err = 0;
+    if (env.has_filter)
+        err = regcomp(&env.regex_filter, env.regexp_filter_ifname, REG_EXTENDED);
+
+    if (err) {
+        fprintf(stderr, "Could not compile regex");
+        goto cleanup1;
+    }
 
     libbpf_set_print(libbpf_print_fn);
 
