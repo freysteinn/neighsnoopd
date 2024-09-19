@@ -1,0 +1,11 @@
+neighadd
+cscope.out
+cscope.in.out
+cscope.po.out
+config.mk
+.ccls-cache
+compile_commands.json
+*.ll
+*.o
+*.skel.h
+lib/libbpf-install/
