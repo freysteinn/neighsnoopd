@@ -40,6 +40,7 @@ static struct env {
     bool has_filter;
     bool is_xdp;
     bool disable_macvlan_filter;
+    bool fail_on_qfilter_present;
     bool verbose;
     bool debug;
     bool netlink;
@@ -60,10 +61,11 @@ const char argp_program_doc[] =
     "Listens for ARP replies and adds the neighbor to the Neighbors table.\n";
 
 static const struct argp_option opts[] = {
-    { "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
     { "filter", 'f', "REGEXP", 0,
       "Regular expression to exclude interfaces from program", 0 },
     { "macvlan", 'm', NULL, 0, "Disable macvlan fitering", 0 },
+    { "no-qfilter-present", 'q', NULL, 0, "Do not replace present Qdisc filter on start", 0 },
+    { "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
     { "xdp", 'x', NULL, 0, "Attach XDP instead of TC", 0},
     { NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help", 0 },
     {},
@@ -819,13 +821,6 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
         case 'h':
             argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
             break;
-        case 'v':
-            if (env.debug)
-                env.netlink = true;
-            if (env.verbose)
-                env.debug = true;
-            env.verbose = true;
-            break;
         case 'f':
             if (strlen(arg) == 0) {
                 fprintf(stderr, "Invalid filter\n");
@@ -835,11 +830,21 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
             env.regexp_filter_ifname = arg;
             env.has_filter = true;
             break;
-        case 'x':
-            env.is_xdp = true;
-            break;
         case 'm':
             env.disable_macvlan_filter = true;
+            break;
+        case 'q':
+            env.fail_on_qfilter_present = true;
+            break;
+        case 'v':
+            if (env.debug)
+                env.netlink = true;
+            if (env.verbose)
+                env.debug = true;
+            env.verbose = true;
+            break;
+        case 'x':
+            env.is_xdp = true;
             break;
         case ARGP_KEY_NO_ARGS:
             fprintf(stderr, "Missing network device <IFNAME_MON>\n");
@@ -930,7 +935,7 @@ int main(int argc, char **argv)
     }
 
     // XDP
-    struct bpf_link * xdp_link;
+    struct bpf_link *xdp_link;
 
     // TC OPTS
     LIBBPF_OPTS(bpf_tc_hook, tc_hook,
@@ -940,6 +945,9 @@ int main(int argc, char **argv)
                 .handle = 1,
                 .priority = 1,
                 .prog_fd = bpf_program__fd(skel->progs.handle_arp_reply_tc));
+
+    if (!env.fail_on_qfilter_present)
+        tc_opts.flags |= BPF_TC_F_REPLACE;
 
     bool hook_created = false;
     if (env.is_xdp) {
@@ -1004,6 +1012,7 @@ cleanup6:
 cleanup5:
     tc_opts.flags = tc_opts.prog_fd = tc_opts.prog_id = 0;
     if (!env.is_xdp) {
+        pr_debug("Removing TC hook\n");
         err = bpf_tc_detach(&tc_hook, &tc_opts);
         if (err)
             perror("Failed to detach TC hook");
