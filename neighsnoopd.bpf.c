@@ -16,7 +16,7 @@
 #include <linux/pkt_cls.h>
 #include "include/xdp/parsing_helpers.h"
 
-#include "neighsnoopd.h"
+#include "neighsnoopd_shared.h"
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
