@@ -43,6 +43,8 @@ static struct env {
     bool fail_on_qfilter_present;
     bool verbose;
     bool debug;
+    bool has_count;
+    int count;
     bool netlink;
 } env;
 
@@ -61,6 +63,9 @@ const char argp_program_doc[] =
     "Listens for ARP replies and adds the neighbor to the Neighbors table.\n";
 
 static const struct argp_option opts[] = {
+    { "count", 'c', "NUM", 0, "This option handles a fixed number of ARP and ND"
+      "replies before terminating the program."
+      "Use this for debugging purposes only", 0 },
     { "filter", 'f', "REGEXP", 0,
       "Regular expression to exclude interfaces from program", 0 },
     { "macvlan", 'm', NULL, 0, "Disable macvlan fitering", 0 },
@@ -821,6 +826,15 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
         case 'h':
             argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
             break;
+        case 'c':
+            env.has_count = true;
+            env.count = strtoul(arg, NULL, 0);
+            if (env.count == 0) {
+                perror("Invalid count");
+                argp_usage(state);
+                exit(EXIT_FAILURE);
+            }
+            break;
         case 'f':
             if (strlen(arg) == 0) {
                 fprintf(stderr, "Invalid filter\n");
@@ -1002,6 +1016,8 @@ int main(int argc, char **argv)
             fprintf(stderr, "Error polling ring buffer");
             break;
         }
+        if (env.has_count && --env.count == 0)
+            break;
     }
     err = 0;
 
