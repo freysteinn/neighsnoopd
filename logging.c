@@ -8,6 +8,8 @@
 
 #include "neighsnoopd.h"
 
+extern struct env env;
+
 void mac_to_string(__u8 *buffer, const __u8 *mac, size_t buffer_size)
 {
     if (buffer_size < MAC_ADDR_STR_LEN) { // "XX:XX:XX:XX:XX:XX" + null terminator
@@ -30,7 +32,6 @@ int pr_nl_attr_neigh(const struct nlattr *attr, void *data)
 {
     int type = mnl_attr_get_type(attr);
     __u8 mac_str[MAC_ADDR_STR_LEN];
-    __u16 vlanid;
 
     __pr_nl(">  [ATTR %d] %d octets", mnl_attr_get_type(attr),
              mnl_attr_get_len(attr));

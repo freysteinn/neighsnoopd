@@ -14,7 +14,7 @@
 
 #define MAC_ADDR_STR_LEN 18
 
-static struct env {
+struct env {
     int ifidx_mon;
     char *regexp_filter_ifname;
     regex_t regex_filter;
@@ -27,7 +27,7 @@ static struct env {
     bool has_count;
     int count;
     bool netlink;
-} env;
+};
 
 void mac_to_string(__u8 *buffer, const __u8 *mac, size_t buffer_size);
 

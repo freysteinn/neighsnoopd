@@ -82,6 +82,8 @@ int handle_arp_reply_xdp(struct xdp_md *ctx)
     if (!arp_reply)
         goto out;
 
+    arp_reply->ingress_ifindex = ctx->ingress_ifindex;
+
     // Send the data to userspace
     bpf_ringbuf_submit(arp_reply, 0);
 out:
@@ -98,6 +100,8 @@ int handle_arp_reply_tc(struct __sk_buff *skb)
 
     if (!arp_reply)
         goto out;
+
+    arp_reply->ingress_ifindex = skb->ifindex;
 
     arp_reply->vlan_id = skb->vlan_present ? skb->vlan_tci
         & VLAN_VID_MASK : 0;

@@ -14,6 +14,7 @@ struct arp_reply {
         __u8 ip_bytes[4];
     };
     __u8 mac[6];
+    __u32 ingress_ifindex;
 };
 
 #endif // NEIGHSNOOPD_SHARED_H_
