@@ -15,7 +15,7 @@ neighsnoopd.bpf.skel.h: neighsnoopd.bpf.o
 	bpftool gen skeleton neighsnoopd.bpf.o > neighsnoopd.bpf.skel.h
 
 neighsnoopd: neighsnoopd.bpf.skel.h neighsnoopd.c neighsnoopd.h neighsnoopd_shared.h
-	gcc -o neighsnoopd neighsnoopd.c logging.c -lbpf -lmnl
+	gcc -Wall -o neighsnoopd neighsnoopd.c logging.c -lbpf -lmnl
 
 clean:
 	rm -f neighsnoopd.bpf.o neighsnoopd.bpf.skel.h neighsnoopd cscope.in.out cscope.out cscope.po.out

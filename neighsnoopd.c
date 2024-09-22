@@ -63,7 +63,7 @@ __u32 mnl_portid;
 const char *argp_program_version = "neighsnoopd 1.0";
 
 const char *argp_program_bug_address =
-        "https://www.github.com/freysteinn/neighsnoopd"; // Should be changed
+        "https://www.github.com/freysteinn/neighsnoopd";
 
 const char argp_program_doc[] =
     "Listens for ARP replies and adds the neighbor to the Neighbors table.\n";
@@ -73,11 +73,15 @@ static const struct argp_option opts[] = {
       "replies before terminating the program."
       "Use this for debugging purposes only", 0 },
     { "filter", 'f', "REGEXP", 0,
-      "Regular expression to exclude interfaces from program", 0 },
-    { "macvlan", 'm', NULL, 0, "Disable macvlan fitering", 0 },
-    { "no-qfilter-present", 'q', NULL, 0, "Do not replace present Qdisc filter on start", 0 },
+      "Filters out interfaces with a regular expression exclude from adding to"
+      "the neighbor cache. Example: -f '^br0|.*-v0^'", 0 },
+    { "macvlan", 'm', NULL, 0, "Disable filtering macvlan devices from being"
+      "added to the neighbor cache.", 0 },
+    { "no-qfilter-present", 'q', NULL, 0, "Do not replace the present Qdisc"
+      "filter if it is present on the Ingress device", 0 },
     { "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
-    { "xdp", 'x', NULL, 0, "Attach XDP instead of TC", 0},
+    { "xdp", 'x', NULL, 0, "Attach XDP instead of TC. This option only works"
+      "on devices with a VLAN header on the packets available to XDP.", 0},
     { NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help", 0 },
     {},
 };
@@ -604,11 +608,15 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
     return 0;
 }
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+// This function is references by argp and not from this code
 static void short_usage(FILE *fp, struct argp_state *state)
 {
     fprintf(stderr, "Usage: %s [--help] [--verbose] <IFNAME_MON>\n",
             state->argv[0]);
 }
+#pragma GCC diagnostic pop
 
 int main(int argc, char **argv)
 {
@@ -686,7 +694,7 @@ int main(int argc, char **argv)
     bool hook_created = false;
     if (env.is_xdp) {
         // attach xdp program to interface
-        bpf_program__attach_xdp(skel->progs.handle_arp_reply_xdp, env.ifidx_mon);
+        xdp_link = bpf_program__attach_xdp(skel->progs.handle_arp_reply_xdp, env.ifidx_mon);
         if (!xdp_link) {
             perror("Failed to attach XDP hook");
             goto cleanup3;
@@ -748,13 +756,14 @@ cleanup6:
 cleanup5:
     tc_opts.flags = tc_opts.prog_fd = tc_opts.prog_id = 0;
     if (!env.is_xdp) {
-        pr_debug("Removing TC hook\n");
+        pr_debug("Detaching the TC hook\n");
         err = bpf_tc_detach(&tc_hook, &tc_opts);
         if (err)
-            perror("Failed to detach TC hook");
+            perror("Failed to detach TC hook\n");
     }
 cleanup4:
     if (hook_created) {
+        pr_debug("Destroying the TC hook\n");
         err = bpf_tc_hook_destroy(&tc_hook);
         if (err)
             perror("Failed to destroy TC hook");

@@ -2,6 +2,9 @@ neighsnoopd
 cscope.out
 cscope.in.out
 cscope.po.out
+cscope.out.in
+cscope.out.po
+cscope.files 
 config.mk
 .ccls-cache
 compile_commands.json
