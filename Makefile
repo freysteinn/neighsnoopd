@@ -4,6 +4,10 @@
 # SPDX-FileContributor: Freysteinn Alfredsson <freysteinn@freysteinn.com>
 # SPDX-FileContributor: Julius Thor Bess Rikardsson <juliusbess@gmail.com>
 
+VERSION_FILE = version.in.h
+GIT_COMMIT_HASH = $(shell git rev-parse --short HEAD)
+VERSION_DEFINE = "\#define GIT_COMMIT \"$(GIT_COMMIT_HASH)\""
+
 all: neighsnoopd
 
 neighsnoopd.bpf.c:
@@ -14,11 +18,14 @@ neighsnoopd.bpf.o: neighsnoopd.bpf.c neighsnoopd_shared.h
 neighsnoopd.bpf.skel.h: neighsnoopd.bpf.o
 	bpftool gen skeleton neighsnoopd.bpf.o > neighsnoopd.bpf.skel.h
 
-neighsnoopd: neighsnoopd.bpf.skel.h neighsnoopd.c neighsnoopd.h neighsnoopd_shared.h
+$(VERSION_FILE):
+	@echo $(VERSION_DEFINE) > $(VERSION_FILE)
+
+neighsnoopd: neighsnoopd.bpf.skel.h neighsnoopd.c neighsnoopd.h neighsnoopd_shared.h $(VERSION_FILE)
 	gcc -Wall -o neighsnoopd neighsnoopd.c logging.c -lbpf -lmnl
 
 clean:
-	rm -f neighsnoopd.bpf.o neighsnoopd.bpf.skel.h neighsnoopd cscope.in.out cscope.out cscope.po.out
+	rm -f neighsnoopd.bpf.o neighsnoopd.bpf.skel.h neighsnoopd cscope.in.out cscope.out cscope.po.out $(VERSION_FILE)
 
 cscope:
 	cscope -b -R -q

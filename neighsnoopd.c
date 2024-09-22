@@ -32,6 +32,8 @@
 #include "neighsnoopd_shared.h" // Shared struct arp_reply with BPF
 #include "neighsnoopd.bpf.skel.h"
 
+#include "version.in.h"
+
 struct env env = {0};
 
 struct lookup_cache {
@@ -60,7 +62,9 @@ static __u32 nlm_seq;
 struct mnl_socket *nl;
 __u32 mnl_portid;
 
-const char *argp_program_version = "neighsnoopd 1.0";
+const char *argp_program_version = "neighsnoopd v0.9\n"
+    "Build date: " __DATE__ " " __TIME__ "\n" \
+    "git commit: " GIT_COMMIT;
 
 const char *argp_program_bug_address =
         "https://www.github.com/freysteinn/neighsnoopd";
