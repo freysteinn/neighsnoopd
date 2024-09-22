@@ -10,12 +10,14 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <linux/types.h>
+#include <net/if.h>
 #include <regex.h>
 
 #define MAC_ADDR_STR_LEN 18
 
 struct env {
     int ifidx_mon;
+    char ifidx_mon_str[IF_NAMESIZE];
     char *regexp_filter_ifname;
     regex_t regex_filter;
     bool has_filter;

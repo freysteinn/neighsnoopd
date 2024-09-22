@@ -1,3 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-FileCopyrightText: 2024 1984 <1984@1984.is> */
+/* SPDX-FileCopyrightText: 2024 Freyx Solutions <frey@freyx.com> */
+/* SPDX-FileContributor: Freysteinn Alfredsson <freysteinn@freysteinn.com> */
+/* SPDX-FileContributor: Julius Thor Bess Rikardsson <juliusbess@gmail.com> */
+
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -26,6 +32,182 @@ void __pr_std(FILE * file, const char *format, ...)
     va_start(args, format);
     vfprintf(file, format, args);
     va_end(args);
+}
+
+int pr_nl_attr_link(const struct nlattr *attr, void *data)
+{
+    int type = mnl_attr_get_type(attr);
+
+    // Print the basic info of the attribute
+    __pr_nl(">  [ATTR %d] %d octets", type, mnl_attr_get_len(attr));
+
+    switch (type) {
+        case IFLA_IFNAME:
+            const char *ifname = mnl_attr_get_str(attr);
+            __pr_nl(" <IFNAME> %s", ifname);
+            break;
+        case IFLA_ADDRESS:
+            const unsigned char *addr = mnl_attr_get_payload(attr);
+            __pr_nl(" <ADDRESS> %02x:%02x:%02x:%02x:%02x:%02x",
+                    addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+            break;
+        case IFLA_BROADCAST:
+            const unsigned char *broadcast = mnl_attr_get_payload(attr);
+            __pr_nl(" <BROADCAST> %02x:%02x:%02x:%02x:%02x:%02x",
+                    broadcast[0], broadcast[1], broadcast[2], broadcast[3],
+                    broadcast[4], broadcast[5]);
+            break;
+        case IFLA_MTU:
+            uint32_t mtu = mnl_attr_get_u32(attr);
+            __pr_nl(" <MTU> %u", mtu);
+            break;
+        case IFLA_OPERSTATE:
+            uint8_t operstate = mnl_attr_get_u8(attr);
+            __pr_nl(" <OPERSTATE> %u", operstate);
+            break;
+        case IFLA_LINKMODE:
+            uint8_t linkmode = mnl_attr_get_u8(attr);
+            __pr_nl(" <LINKMODE> %u", linkmode);
+            break;
+        case IFLA_LINK:
+            uint32_t link = mnl_attr_get_u32(attr);
+            __pr_nl(" <LINK> %u", link);
+            break;
+        case IFLA_STATS:
+            // Assume statistics as a payload (like struct rtnl_link_stats)
+            const struct rtnl_link_stats *stats = mnl_attr_get_payload(attr);
+            __pr_nl(" <STATS> RX packets: %u, TX packets: %u",
+                    stats->rx_packets, stats->tx_packets);
+            break;
+        case IFLA_QDISC:
+            const char *qdisc = mnl_attr_get_str(attr);
+            __pr_nl(" <QDISC> %s", qdisc);
+            break;
+        case IFLA_CARRIER:
+            uint8_t carrier = mnl_attr_get_u8(attr);
+            __pr_nl(" <CARRIER> %u", carrier);
+            break;
+        case IFLA_MASTER:
+            uint32_t master = mnl_attr_get_u32(attr);
+            __pr_nl(" <MASTER> %u", master);
+            break;
+        case IFLA_NUM_TX_QUEUES:
+            uint32_t num_tx_queues = mnl_attr_get_u32(attr);
+            __pr_nl(" <NUM_TX_QUEUES> %u", num_tx_queues);
+            break;
+        case IFLA_NUM_RX_QUEUES:
+            uint32_t num_rx_queues = mnl_attr_get_u32(attr);
+            __pr_nl(" <NUM_RX_QUEUES> %u", num_rx_queues);
+            break;
+        case IFLA_LINKINFO:
+            __pr_nl(" <LINKINFO> NESTED");
+
+            // Parse the nested attributes
+            struct nlattr *nested_attr;
+            mnl_attr_for_each_nested(nested_attr, attr) {
+                int nested_type = mnl_attr_get_type(nested_attr);
+
+                __pr_nl("\n> [NESTED ATTR %d] %d octets", nested_type,
+                        mnl_attr_get_len(nested_attr));
+
+                switch (nested_type) {
+                    case IFLA_INFO_KIND: {
+                        const char *kind = mnl_attr_get_str(nested_attr);
+                        __pr_nl(" <INFO_KIND> %s", kind);
+                        break;
+                    }
+                    case IFLA_INFO_DATA: {
+                        __pr_nl(" <INFO_DATA> NESTED");
+                        struct nlattr *info_data_attr;
+                        mnl_attr_for_each_nested(info_data_attr, nested_attr) {
+                            int info_data_type = mnl_attr_get_type(
+                                info_data_attr);
+                            __pr_nl("\n>   [INFO_DATA ATTR %d] %d octets",
+                                    info_data_type, mnl_attr_get_len(
+                                        info_data_attr));
+                        }
+                        break;
+                    }
+                    default:
+                        __pr_nl(" <UNKNOWN NESTED(%d)>", nested_type);
+                        break;
+                }
+            }
+        case IFLA_GSO_MAX_SEGS:
+            uint32_t gso_max_segs = mnl_attr_get_u32(attr);
+            __pr_nl(" <GSO_MAX_SEGS> %u", gso_max_segs);
+            break;
+        case IFLA_GSO_MAX_SIZE:
+            uint32_t gso_max_size = mnl_attr_get_u32(attr);
+            __pr_nl(" <GSO_MAX_SIZE> %u", gso_max_size);
+            break;
+        default:
+            // Print unknown attributes
+            __pr_nl(" <UNKNOWN(%d)>", type);
+            break;
+    }
+    __pr_nl("\n");
+
+    return MNL_CB_OK;
+}
+
+int pr_nl_link(const struct nlmsghdr *nlh)
+{
+    struct ifinfomsg *ifm = mnl_nlmsg_get_payload(nlh);
+
+    __pr_nl(">  [LINK Header] %d octets\n", nlh->nlmsg_len);
+    __pr_nl(">    .ifi_family = %d\n", ifm->ifi_family);
+    __pr_nl(">    .ifi_type = %d\n", ifm->ifi_type);
+    __pr_nl(">    .ifi_index = %d\n", ifm->ifi_index);
+    __pr_nl(">    .ifi_flags = %d <", ifm->ifi_flags);
+    unsigned flags = ifm->ifi_flags;
+    while (flags) {
+        int bit_pos = __builtin_ctzll(flags);
+        int flag = 1 << bit_pos;
+        if (flag & IFF_UP)
+            __pr_nl("UP");
+        if (flag & IFF_BROADCAST)
+            __pr_nl("BROADCAST");
+        if (flag & IFF_DEBUG)
+            __pr_nl("DEBUG");
+        if (flag & IFF_LOOPBACK)
+            __pr_nl("LOOPBACK");
+        if (flag & IFF_POINTOPOINT)
+            __pr_nl("POINTOPOINT");
+        if (flag & IFF_NOTRAILERS)
+            __pr_nl("NOTRAILERS");
+        if (flag & IFF_RUNNING)
+            __pr_nl("RUNNING");
+        if (flag & IFF_NOARP)
+            __pr_nl("NOARP");
+        if (flag & IFF_PROMISC)
+            __pr_nl("PROMISC");
+        if (flag & IFF_ALLMULTI)
+            __pr_nl("ALLMULTI");
+        if (flag & IFF_MASTER)
+            __pr_nl("MASTER");
+        if (flag & IFF_SLAVE)
+            __pr_nl("SLAVE");
+        if (flag & IFF_MULTICAST)
+            __pr_nl("MULTICAST");
+        if (flag & IFF_PORTSEL)
+            __pr_nl("PORTSEL");
+        if (flag & IFF_AUTOMEDIA)
+            __pr_nl("AUTOMEDIA");
+        if (flag & IFF_DYNAMIC)
+            __pr_nl("DYNAMIC");
+        if (flag > IFF_DYNAMIC)
+            __pr_nl("UNKNOWN(0x%x)", flag);
+        if (__builtin_popcountll(flags) > 1)
+            __pr_nl(",");
+        flags &= (flags - 1);
+    }
+    __pr_nl(">\n");
+    __pr_nl(">    .ifi_change = %d\n", ifm->ifi_change);
+
+    mnl_attr_parse(nlh, sizeof(*ifm), pr_nl_attr_link, NULL);
+
+    return MNL_CB_OK;
 }
 
 int pr_nl_attr_neigh(const struct nlattr *attr, void *data)
@@ -105,7 +287,7 @@ int pr_nl_attr_neigh(const struct nlattr *attr, void *data)
     return MNL_CB_OK;
 }
 
-int pr_nl_neigh_ndm(const struct nlmsghdr *nlh)
+int pr_nl_neigh(const struct nlmsghdr *nlh)
 {
     struct ndmsg *ndm = mnl_nlmsg_get_payload(nlh);
 
@@ -239,6 +421,12 @@ void pr_nl_nlmsg(struct nlmsghdr *nlh, __u32 seq)
         case NLMSG_OVERRUN:
             __pr_nl("OVERRUN");
             break;
+        case RTM_GETLINK:
+            __pr_nl("GETLINK");
+            break;
+        case RTM_NEWLINK:
+            __pr_nl("NEWLINK");
+            break;
         case RTM_NEWNEIGH:
             __pr_nl("NEWNEIGH");
             break;
@@ -277,8 +465,10 @@ void pr_nl_nlmsg(struct nlmsghdr *nlh, __u32 seq)
     __pr_nl(">    .seq = %d\n", nlh->nlmsg_seq);
     __pr_nl(">    .port = %d\n", nlh->nlmsg_pid);
 
-    if (nlh->nlmsg_type == RTM_NEWNEIGH || nlh->nlmsg_type == RTM_GETNEIGH)
-        ret = pr_nl_neigh_ndm(nlh);
+    if (nlh->nlmsg_type == RTM_NEWLINK || nlh->nlmsg_type == RTM_GETLINK)
+        ret = pr_nl_link(nlh);
+    else if (nlh->nlmsg_type == RTM_NEWNEIGH || nlh->nlmsg_type == RTM_GETNEIGH)
+        ret = pr_nl_neigh(nlh);
     else
         ret = pr_nl_ndm(nlh);
     if (ret <= MNL_CB_ERROR) {

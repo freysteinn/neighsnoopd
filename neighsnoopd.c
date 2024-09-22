@@ -16,6 +16,7 @@
 #include <time.h>
 #include <ifaddrs.h>
 #include <regex.h>
+#include <string.h>
 
 #include <linux/bpf.h>
 #include <bpf/bpf.h>
@@ -149,66 +150,6 @@ out:
     return err;
 }
 
-static bool find_ifindex_from_ip(struct lookup_cache *cache)
-{
-    struct ifaddrs *ifaddr, *ifa;
-    struct sockaddr_in *addr, *netmask;
-    struct in_addr *given_ip = &cache->arp_reply->ip;
-    in_addr_t network, given_ip_network;
-    const char* matching_ifname = NULL;
-    __u32 matching_ifindex;
-
-    if (getifaddrs(&ifaddr) == -1)
-        return false;
-
-    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr == NULL || ifa->ifa_netmask == NULL)
-            continue;
-
-        if (ifa->ifa_addr->sa_family == AF_INET) {
-            addr = (struct sockaddr_in *)ifa->ifa_addr;
-            netmask = (struct sockaddr_in *)ifa->ifa_netmask;
-
-            // Calculate the network address
-            network = addr->sin_addr.s_addr & netmask->sin_addr.s_addr;
-            given_ip_network = given_ip->s_addr & network;
-
-            // Compare the network addresses
-            if (network == given_ip_network) {
-                matching_ifname = ifa->ifa_name;
-                break;
-            }
-        }
-    }
-    freeifaddrs(ifaddr);
-
-    if (!matching_ifname) {
-        pr_debug("No interface found for IP: %s\n", cache->debug.ip_str);
-        return false;
-    }
-
-    matching_ifindex = if_nametoindex(matching_ifname);
-    if (!matching_ifindex) {
-        pr_err(errno, "if_nametoindex");
-        return false;
-    }
-
-    memcpy(cache->ifname, matching_ifname, sizeof(cache->ifname));
-    cache->ifindex = matching_ifindex;
-
-    if (env.debug) {
-        cache->debug.cidr = __builtin_popcountll(
-            ntohl(netmask->sin_addr.s_addr));
-        inet_ntop(AF_INET, &network, cache->debug.network_str, INET_ADDRSTRLEN);
-        pr_debug("Found IP: %s in %s/%d on %s\n",
-                 cache->debug.ip_str,
-                 cache->debug.network_str,
-                 cache->debug.cidr,
-                 cache->ifname);
-    }
-    return true;
-}
-
 static bool filter_interfaces(char *ifname)
 {
     int ret;
@@ -298,12 +239,17 @@ static int getlink_parse_attr_cb(const struct nlattr *attr, void *data)
         return MNL_CB_OK;
 
     switch(type) {
-    case IFLA_LINK:
-        if (mnl_attr_validate(attr, MNL_TYPE_U32) < 0) {
-            pr_err(errno, "mnl_attr_validate");
-            return MNL_CB_ERROR;
-        }
-        break;
+        case IFLA_LINK:
+            if (mnl_attr_validate(attr, MNL_TYPE_U32) < 0) {
+                pr_err(errno, "mnl_attr_validate");
+                return MNL_CB_ERROR;
+            }
+            break;
+        case IFLA_LINKINFO:
+            if (mnl_attr_validate(attr, MNL_TYPE_NESTED) < 0) {
+                pr_err(errno, "mnl_attr_validate");
+                return MNL_CB_ERROR;
+            }
     }
     tb[type] = attr;
     return MNL_CB_OK;
@@ -326,8 +272,8 @@ static int getlink_parse_nlm_cb(const struct nlmsghdr *nlh, void *data)
     if (ret < 0)
         return ret;
 
-    if (tb[IFLA_LINK] == NULL)
-        return MNL_CB_OK;
+    if (tb[IFLA_LINK])
+        cache->link_ifindex = mnl_attr_get_u32(tb[IFLA_LINK]);
 
     if (tb[IFLA_LINKINFO]) {
         struct nlattr *link_attr;
@@ -457,6 +403,84 @@ static bool probe_fdb(struct lookup_cache *cache)
     return true;
 }
 
+static bool find_ifindex_from_ip(struct lookup_cache *cache)
+{
+    struct ifaddrs *ifaddr, *ifa;
+    struct sockaddr_in *addr, *netmask;
+    struct in_addr *given_ip = &cache->arp_reply->ip;
+    in_addr_t network, given_ip_network;
+    const char* matching_ifname = NULL;
+    __u32 matching_ifindex;
+
+    if (getifaddrs(&ifaddr) == -1)
+        return false;
+
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL || ifa->ifa_netmask == NULL)
+            continue;
+
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            struct lookup_cache getlink_cache = *cache;
+            addr = (struct sockaddr_in *)ifa->ifa_addr;
+            netmask = (struct sockaddr_in *)ifa->ifa_netmask;
+
+            // Calculate the network address
+            network = addr->sin_addr.s_addr & netmask->sin_addr.s_addr;
+            given_ip_network = given_ip->s_addr & network;
+
+            // Compare the network addresses
+            if (network != given_ip_network)
+                continue;
+
+            getlink_cache.ifindex = if_nametoindex(ifa->ifa_name);
+            if (!getlink_cache.ifindex) {
+                pr_err(errno, "if_nametoindex");
+                continue;
+            }
+
+            probe_ifindex(&getlink_cache);
+
+            if (getlink_cache.link_ifindex != env.ifidx_mon) {
+                pr_debug("Skipping interface %d because it isn't directly"
+                         "connected to %d\n", getlink_cache.link_ifindex,
+                         env.ifidx_mon);
+                continue;
+            }
+
+            matching_ifname = ifa->ifa_name;
+            *cache = getlink_cache;
+        }
+    }
+    freeifaddrs(ifaddr);
+
+    if (!matching_ifname) {
+        pr_debug("No interface found for IP: %s\n", cache->debug.ip_str);
+        return false;
+    }
+
+    matching_ifindex = if_nametoindex(matching_ifname);
+    if (!matching_ifindex) {
+        pr_err(errno, "if_nametoindex");
+        return false;
+    }
+
+    memcpy(cache->ifname, matching_ifname, sizeof(cache->ifname));
+    cache->ifindex = matching_ifindex;
+
+    if (env.debug) {
+        cache->debug.cidr = __builtin_popcountll(
+            ntohl(netmask->sin_addr.s_addr));
+        inet_ntop(AF_INET, &network, cache->debug.network_str, INET_ADDRSTRLEN);
+        pr_debug("Found IP: %s in %s/%d on %s linked to %s\n",
+                 cache->debug.ip_str,
+                 cache->debug.network_str,
+                 cache->debug.cidr,
+                 cache->ifname,
+                 env.ifidx_mon_str);
+    }
+    return true;
+}
+
 // Callback function to handle data from the ring buffer
 static int handle_arp_reply(void *ctx, void *data, size_t data_sz)
 {
@@ -482,7 +506,6 @@ static int handle_arp_reply(void *ctx, void *data, size_t data_sz)
         return 1;
     }
 
-    probe_ifindex(&cache);
     if (cache.is_macvlan && !env.disable_macvlan_filter) {
         pr_debug("Interface '%s' is a macvlan: filtered\n", cache.ifname);
         return 1;
@@ -572,6 +595,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
                 argp_usage(state);
                 exit(EXIT_FAILURE);
             }
+            strncpy(env.ifidx_mon_str, arg, sizeof(env.ifidx_mon_str));
             pos_args++;
             break;
         default:
