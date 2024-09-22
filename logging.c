@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <errno.h>
 #include <arpa/inet.h>
 #include <linux/if_ether.h>
 #include <linux/rtnetlink.h>
@@ -15,16 +16,6 @@
 #include "neighsnoopd.h"
 
 extern struct env env;
-
-void mac_to_string(__u8 *buffer, const __u8 *mac, size_t buffer_size)
-{
-    if (buffer_size < MAC_ADDR_STR_LEN) { // "XX:XX:XX:XX:XX:XX" + null terminator
-        buffer[0] = '\0'; // Not enough space, return an empty string
-        return;
-    }
-    snprintf((char *)buffer, buffer_size, "%02x:%02x:%02x:%02x:%02x:%02x",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-}
 
 void __pr_std(FILE * file, const char *format, ...)
 {
@@ -37,6 +28,7 @@ void __pr_std(FILE * file, const char *format, ...)
 int pr_nl_attr_link(const struct nlattr *attr, void *data)
 {
     int type = mnl_attr_get_type(attr);
+    char ip_str[INET6_ADDRSTRLEN];
 
     // Print the basic info of the attribute
     __pr_nl(">  [ATTR %d] %d octets", type, mnl_attr_get_len(attr));
@@ -48,8 +40,8 @@ int pr_nl_attr_link(const struct nlattr *attr, void *data)
             break;
         case IFLA_ADDRESS:
             const unsigned char *addr = mnl_attr_get_payload(attr);
-            __pr_nl(" <ADDRESS> %02x:%02x:%02x:%02x:%02x:%02x",
-                    addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+            format_ip_address(ip_str, sizeof(ip_str), (struct in6_addr *)addr);
+            __pr_nl(" <ADDRESS> %s", ip_str);
             break;
         case IFLA_BROADCAST:
             const unsigned char *broadcast = mnl_attr_get_payload(attr);
@@ -214,6 +206,7 @@ int pr_nl_attr_neigh(const struct nlattr *attr, void *data)
 {
     int type = mnl_attr_get_type(attr);
     __u8 mac_str[MAC_ADDR_STR_LEN];
+    char ip_str[INET6_ADDRSTRLEN];
 
     __pr_nl(">  [ATTR %d] %d octets", mnl_attr_get_type(attr),
              mnl_attr_get_len(attr));
@@ -222,8 +215,9 @@ int pr_nl_attr_neigh(const struct nlattr *attr, void *data)
             __pr_nl(" <UNSPEC>");
             break;
         case NDA_DST:
-            __pr_nl(" <DST> IP: %s",
-                     inet_ntoa(*(struct in_addr *)mnl_attr_get_payload(attr)));
+            const unsigned char *addr = mnl_attr_get_payload(attr);
+            format_ip_address(ip_str, sizeof(ip_str), (struct in6_addr *)addr);
+            __pr_nl(" <DST> IP: %s", ip_str);
             break;
         case NDA_LLADDR:
             if (mnl_attr_get_len(attr) >= ETH_ALEN) {

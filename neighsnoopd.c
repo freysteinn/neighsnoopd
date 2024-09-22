@@ -29,7 +29,7 @@
 
 #include "neighsnoopd.h"
 
-#include "neighsnoopd_shared.h" // Shared struct arp_reply with BPF
+#include "neighsnoopd_shared.h" // Shared struct neighbor_reply with BPF
 #include "neighsnoopd.bpf.skel.h"
 
 #include "version.in.h"
@@ -37,12 +37,14 @@
 struct env env = {0};
 
 struct lookup_cache {
-    struct arp_reply *arp_reply;
+    struct neighbor_reply *neighbor_reply;
     __u8 mac_str[MAC_ADDR_STR_LEN];
     __u32 ifindex;
     char ifname[IFNAMSIZ];
     __u32 link_ifindex;
-    char kind[IFNAMSIZ];
+    char kind[128];
+    char ip_str[INET6_ADDRSTRLEN];
+    __u32 cidr;
 
     // FDB
     bool is_ext_learned;
@@ -50,9 +52,7 @@ struct lookup_cache {
 
     // Debug information for debug mode only
     struct {
-        char ip_str[INET_ADDRSTRLEN];
-        char network_str[INET_ADDRSTRLEN];
-        __u32 cidr;
+        char network_str[INET6_ADDRSTRLEN];
     } debug;
 };
 
@@ -70,10 +70,13 @@ const char *argp_program_bug_address =
         "https://github.com/1984hosting/neighsnoopd";
 
 const char argp_program_doc[] =
-    "Listens for ARP replies and adds the neighbor to the Neighbors table.\n";
+    "Listens for ARP and NA replies and adds the neighbor to the Neighbors"
+    "table.\n";
 
 static const struct argp_option opts[] = {
-    { "count", 'c', "NUM", 0, "This option handles a fixed number of ARP and ND"
+    { "ipv4", '4', NULL, 0, "Only handle IPv4 ARP Reply packets", 0 },
+    { "ipv6", '6', NULL, 0, "Only handle IPv6 NA packets", 0 },
+    { "count", 'c', "NUM", 0, "This option handles a fixed number of ARP or NA"
       "replies before terminating the program."
       "Use this for debugging purposes only", 0 },
     { "filter", 'f', "REGEXP", 0,
@@ -97,34 +100,43 @@ static int add_neigh(struct lookup_cache *cache)
     char buf[MNL_SOCKET_BUFFER_SIZE];
     struct nlmsghdr *nlh;
     struct ndmsg *ndm;
+    struct in6_addr *addr = &cache->neighbor_reply->ip;
     int ret;
 
     nlh = mnl_nlmsg_put_header(buf);
     nlh->nlmsg_type = RTM_NEWNEIGH;
-    nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK | NLM_F_EXCL;
+    if (cache->neighbor_reply->in_family == AF_INET6)
+        nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_REPLACE | NLM_F_ACK;
+    else
+        nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK | NLM_F_EXCL;
     nlh->nlmsg_seq = ++nlm_seq;
 
     ndm = mnl_nlmsg_put_extra_header(nlh, sizeof(*ndm));
-    ndm->ndm_family = AF_INET;
+    ndm->ndm_family = cache->neighbor_reply->in_family;
     ndm->ndm_state = NUD_REACHABLE;
     ndm->ndm_ifindex = cache->ifindex;
 
     // Add IP address
-    mnl_attr_put(nlh, NDA_DST, sizeof(cache->arp_reply->ip),
-                 &cache->arp_reply->ip);
+    if (IN6_IS_ADDR_V4MAPPED(addr)) {
+        struct in_addr ipv4_addr;
+        memcpy(&ipv4_addr, &addr->s6_addr[12], sizeof(ipv4_addr));
+        mnl_attr_put(nlh, NDA_DST, sizeof(ipv4_addr), &ipv4_addr);
+    } else {
+        mnl_attr_put(nlh, NDA_DST, sizeof(*addr), addr);
+    }
 
     // Add MAC address
-    mnl_attr_put(nlh, NDA_LLADDR, sizeof(cache->arp_reply->mac),
-                 cache->arp_reply->mac);
+    mnl_attr_put(nlh, NDA_LLADDR, sizeof(cache->neighbor_reply->mac),
+                 cache->neighbor_reply->mac);
 
     // Add VLAN information if needed
-    if (cache->arp_reply->vlan_id > 0)
-        mnl_attr_put(nlh, NDA_VLAN, sizeof(cache->arp_reply->vlan_id),
-                     &cache->arp_reply->vlan_id);
+    if (cache->neighbor_reply->vlan_id > 0)
+        mnl_attr_put(nlh, NDA_VLAN, sizeof(cache->neighbor_reply->vlan_id),
+                     &cache->neighbor_reply->vlan_id);
 
     pr_debug("Requesting to add neighbor:\n");
     pr_debug("- Interface %d: %s\n", cache->ifindex, cache->ifname);
-    pr_debug("- IP address: %s\n", cache->debug.ip_str);
+    pr_debug("- IP address: %s\n", cache->ip_str);
     pr_debug("- MAC address: %s\n", cache->mac_str);
 
     pr_nl("Sending netlink message\n");
@@ -148,11 +160,18 @@ static int add_neigh(struct lookup_cache *cache)
 
     err = mnl_cb_run(buf, ret, nlm_seq, mnl_portid,
                      NULL, NULL);
-    if (err < MNL_CB_STOP)
-        pr_info("Added MAC: %s to FDB on interface: %s\n",
-                cache->mac_str, cache->ifname);
-    if (err == EEXIST)
-        pr_debug("Mac address already exists in FDB\n");
+    if (err < MNL_CB_STOP) {
+        if (errno == EEXIST) {
+            pr_debug("Neighbor already exists in the cache\n");
+            goto out;
+        }
+        pr_err(errno, "Failed to parse Netlink message");
+        goto out;
+    }
+
+    err = 0; // Success
+    pr_info("Added MAC: %s IP: %s/%d to FDB on interface: %s\n",
+            cache->mac_str, cache->ip_str, cache->cidr, cache->ifname);
 
 out:
     return err;
@@ -280,6 +299,7 @@ static int getlink_parse_nlm_cb(const struct nlmsghdr *nlh, void *data)
     if (ret < 0)
         return ret;
 
+    // Add attributes to cache
     if (tb[IFLA_LINK])
         cache->link_ifindex = mnl_attr_get_u32(tb[IFLA_LINK]);
 
@@ -293,9 +313,6 @@ static int getlink_parse_nlm_cb(const struct nlmsghdr *nlh, void *data)
             }
         }
     }
-
-    // Add attributes to cache
-    cache->link_ifindex = mnl_attr_get_u32(tb[IFLA_LINK]);
 
     if (strcmp(cache->kind, "macvlan") == 0)
         cache->is_macvlan = true;
@@ -326,7 +343,8 @@ static bool probe_ifindex(struct lookup_cache *cache)
         return false;
     }
 
-    pr_debug("Device %s is of type: %s\n", cache->mac_str, cache->kind);
+    pr_debug("Device %d is of type: %s\n", cache->ifindex, strlen(
+                 cache->kind) ? cache->kind : "unknown");
     return true;
 }
 
@@ -374,8 +392,8 @@ static int getneigh_parse_nlm_cb(const struct nlmsghdr *nlh, void *data)
         return MNL_CB_OK;
 
     fdb_mac = mnl_attr_get_payload(tb[NDA_LLADDR]);
-    if (memcmp(fdb_mac, cache->arp_reply->mac,
-               sizeof(cache->arp_reply->mac)) != 0)
+    if (memcmp(fdb_mac, cache->neighbor_reply->mac,
+               sizeof(cache->neighbor_reply->mac)) != 0)
         return MNL_CB_OK;
 
     // Add attributes to cache
@@ -414,94 +432,132 @@ static bool probe_fdb(struct lookup_cache *cache)
 static bool find_ifindex_from_ip(struct lookup_cache *cache)
 {
     struct ifaddrs *ifaddr, *ifa;
-    struct sockaddr_in *addr, *netmask;
-    struct in_addr *given_ip = &cache->arp_reply->ip;
-    in_addr_t network, given_ip_network;
+    struct sockaddr_in6 *addr6, *netmask6;
+    struct sockaddr_in *addr4, *netmask4;
+    struct in6_addr addr, netmask;
+    struct in6_addr *given_ip = &cache->neighbor_reply->ip;
+    struct in6_addr given_ip_network, network;
     const char* matching_ifname = NULL;
     __u32 matching_ifindex;
 
     if (getifaddrs(&ifaddr) == -1)
-        return false;
+        goto err1;
 
     for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        struct lookup_cache getlink_cache = *cache;
         if (ifa->ifa_addr == NULL || ifa->ifa_netmask == NULL)
             continue;
 
+        // Map legacy IPv4 addresses to IPv6
         if (ifa->ifa_addr->sa_family == AF_INET) {
-            struct lookup_cache getlink_cache = *cache;
-            addr = (struct sockaddr_in *)ifa->ifa_addr;
-            netmask = (struct sockaddr_in *)ifa->ifa_netmask;
-
-            // Calculate the network address
-            network = addr->sin_addr.s_addr & netmask->sin_addr.s_addr;
-            given_ip_network = given_ip->s_addr & network;
-
-            // Compare the network addresses
-            if (network != given_ip_network)
-                continue;
-
-            getlink_cache.ifindex = if_nametoindex(ifa->ifa_name);
-            if (!getlink_cache.ifindex) {
-                pr_err(errno, "if_nametoindex");
-                continue;
-            }
-
-            probe_ifindex(&getlink_cache);
-
-            if (getlink_cache.link_ifindex != env.ifidx_mon) {
-                pr_debug("Skipping interface %d because it isn't directly"
-                         "connected to %d\n", getlink_cache.link_ifindex,
-                         env.ifidx_mon);
-                continue;
-            }
-
-            matching_ifname = ifa->ifa_name;
-            *cache = getlink_cache;
+            // Handle IPv4 to IPv6 mapping
+            addr4 = (struct sockaddr_in *)ifa->ifa_addr;
+            netmask4 = (struct sockaddr_in *)ifa->ifa_netmask;
+            map_ipv4_to_ipv6(&addr, addr4->sin_addr.s_addr);
+            map_ipv4_to_ipv6(&netmask, netmask4->sin_addr.s_addr);
+        } else if (ifa->ifa_addr->sa_family == AF_INET6) {
+            // Handle IPv6 addresses
+            addr6 = (struct sockaddr_in6 *)ifa->ifa_addr;
+            netmask6 = (struct sockaddr_in6 *)ifa->ifa_netmask;
+            addr = addr6->sin6_addr;
+            netmask = netmask6->sin6_addr;
+        } else { // Ignore unknown address families
+            continue;
         }
+
+        // Calculate the network address
+        calculate_network_address(&addr, &netmask, &network);
+        calculate_network_address(given_ip, &netmask, &given_ip_network);
+
+        // Compare the network addresses
+        if (!compare_ipv6_addresses(&network, &given_ip_network))
+            continue;
+
+        getlink_cache.ifindex = if_nametoindex(ifa->ifa_name);
+        if (!getlink_cache.ifindex) {
+            pr_err(errno, "if_nametoindex");
+            continue;
+        }
+
+        probe_ifindex(&getlink_cache);
+
+        if (getlink_cache.link_ifindex == 0)
+            continue;
+
+        if (getlink_cache.link_ifindex != env.ifidx_mon) {
+            pr_debug("Skipping interface %d because it isn't directly"
+                     "connected to %d\n", getlink_cache.link_ifindex,
+                     env.ifidx_mon);
+            continue;
+        }
+
+        matching_ifname = ifa->ifa_name;
+        *cache = getlink_cache;
+        break; // Found a matching interface
     }
-    freeifaddrs(ifaddr);
 
     if (!matching_ifname) {
-        pr_debug("No interface found for IP: %s\n", cache->debug.ip_str);
-        return false;
+        pr_debug("No interface found for IP: %s\n", cache->ip_str);
+        goto err2;
     }
 
     matching_ifindex = if_nametoindex(matching_ifname);
     if (!matching_ifindex) {
         pr_err(errno, "if_nametoindex");
-        return false;
+        goto err2;
     }
 
     memcpy(cache->ifname, matching_ifname, sizeof(cache->ifname));
     cache->ifindex = matching_ifindex;
 
+    cache->cidr = calculate_cidr(&netmask);
+
     if (env.debug) {
-        cache->debug.cidr = __builtin_popcountll(
-            ntohl(netmask->sin_addr.s_addr));
-        inet_ntop(AF_INET, &network, cache->debug.network_str, INET_ADDRSTRLEN);
+        if (format_ip_address(cache->debug.network_str,
+                              sizeof(cache->debug.network_str), &network)) {
+            pr_err(errno, "format_ip_address");
+            goto err2;
+        }
         pr_debug("Found IP: %s in %s/%d on %s linked to %s\n",
-                 cache->debug.ip_str,
+                 cache->ip_str,
                  cache->debug.network_str,
-                 cache->debug.cidr,
+                 cache->cidr,
                  cache->ifname,
                  env.ifidx_mon_str);
     }
     return true;
+err2:
+    freeifaddrs(ifaddr);
+err1:
+    return false;
 }
 
 // Callback function to handle data from the ring buffer
-static int handle_arp_reply(void *ctx, void *data, size_t data_sz)
+static int handle_neighbor_reply(void *ctx, void *data, size_t data_sz)
 {
     struct lookup_cache cache = {0};
-    cache.arp_reply = (struct arp_reply *)data;
+    cache.neighbor_reply = (struct neighbor_reply *)data;
 
-    mac_to_string(cache.mac_str, cache.arp_reply->mac, sizeof(cache.mac_str));
+    if (env.only_ipv6 && cache.neighbor_reply->in_family != AF_INET6)
+        return 1;
+    else if (env.only_ipv4 && cache.neighbor_reply->in_family != AF_INET)
+        return 1;
 
-    if (env.debug)
-        memcpy(cache.debug.ip_str, inet_ntoa(cache.arp_reply->ip),
-               sizeof(cache.debug.ip_str));
-    pr_debug("Received ARP Reply MAC: %s - IP: %s\n", cache.mac_str,
-             cache.debug.ip_str);
+    env.count--;
+
+    pr_debug("Received Neighbor Reply\n");
+
+    mac_to_string(cache.mac_str, cache.neighbor_reply->mac,
+                  sizeof(cache.mac_str));
+
+    if (format_ip_address(cache.ip_str, sizeof(cache.ip_str),
+                          &cache.neighbor_reply->ip)) {
+        pr_err(errno, "format_ip_address");
+        return 1;
+    }
+
+    pr_debug("Received Neighbor Reply MAC: %s - IP: %s\n", cache.mac_str,
+             cache.ip_str);
 
     if (!find_ifindex_from_ip(&cache)) {
         pr_debug("No interface mached destination: filtered\n");
@@ -552,6 +608,22 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
     switch (key) {
         case 'h':
             argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
+            break;
+        case '4':
+            if (env.only_ipv6) {
+                fprintf(stderr, "Cannot specify both --ipv4 and --ipv6\n");
+                argp_usage(state);
+                exit(EXIT_FAILURE);
+            }
+            env.only_ipv4 = true;
+            break;
+        case '6':
+            if (env.only_ipv4) {
+                fprintf(stderr, "Cannot specify both --ipv4 and --ipv6\n");
+                argp_usage(state);
+                exit(EXIT_FAILURE);
+            }
+            env.only_ipv6 = true;
             break;
         case 'c':
             env.has_count = true;
@@ -690,7 +762,8 @@ int main(int argc, char **argv)
     LIBBPF_OPTS(bpf_tc_opts, tc_opts,
                 .handle = 1,
                 .priority = 1,
-                .prog_fd = bpf_program__fd(skel->progs.handle_arp_reply_tc));
+                .prog_fd = bpf_program__fd(
+                    skel->progs.handle_neighbor_reply_tc));
 
     if (!env.fail_on_qfilter_present)
         tc_opts.flags |= BPF_TC_F_REPLACE;
@@ -698,7 +771,8 @@ int main(int argc, char **argv)
     bool hook_created = false;
     if (env.is_xdp) {
         // attach xdp program to interface
-        xdp_link = bpf_program__attach_xdp(skel->progs.handle_arp_reply_xdp, env.ifidx_mon);
+        xdp_link = bpf_program__attach_xdp(
+            skel->progs.handle_neighbor_reply_xdp, env.ifidx_mon);
         if (!xdp_link) {
             perror("Failed to attach XDP hook");
             goto cleanup3;
@@ -724,12 +798,12 @@ int main(int argc, char **argv)
             goto cleanup4;
     }
 
-    // Parse ARP replies
+    // Parse Neighbor replies
     struct bpf_map *ringbuf_map =
-        bpf_object__find_map_by_name(skel->obj, "arp_ringbuf");
+        bpf_object__find_map_by_name(skel->obj, "neighbor_ringbuf");
 
     struct ring_buffer *rb = ring_buffer__new(bpf_map__fd(ringbuf_map),
-                                              handle_arp_reply, NULL, NULL);
+                                              handle_neighbor_reply, NULL, NULL);
     if (!rb) {
         fprintf(stderr, "Failed to create ring buffer");
         goto cleanup5;
@@ -748,7 +822,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "Error polling ring buffer");
             break;
         }
-        if (env.has_count && --env.count == 0)
+        if (env.has_count && env.count == 0)
             break;
     }
     err = 0;
