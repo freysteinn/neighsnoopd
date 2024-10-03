@@ -11,7 +11,10 @@
 #include <stdbool.h>
 #include <linux/types.h>
 #include <net/if.h>
+#include <netinet/in.h>
 #include <regex.h>
+
+#include <libmnl/libmnl.h>
 
 #define MAC_ADDR_STR_LEN 18
 
@@ -24,6 +27,8 @@ struct env {
     bool is_xdp;
     bool disable_macvlan_filter;
     bool fail_on_qfilter_present;
+    bool only_ipv4;
+    bool only_ipv6;
     bool verbose;
     bool debug;
     bool has_count;
@@ -32,6 +37,14 @@ struct env {
 };
 
 void mac_to_string(__u8 *buffer, const __u8 *mac, size_t buffer_size);
+void calculate_network_address(const struct in6_addr *ip,
+                               const struct in6_addr *netmask,
+                               struct in6_addr *network);
+int compare_ipv6_addresses(const struct in6_addr *addr1,
+                           const struct in6_addr *addr2);
+int format_ip_address(char *buf, size_t size,
+                             const struct in6_addr *addr);
+int calculate_cidr(const struct in6_addr *addr);
 
 // Print functions
 void __pr_std(FILE * file, const char *format, ...);

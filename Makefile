@@ -13,7 +13,7 @@ all: neighsnoopd
 neighsnoopd.bpf.c:
 
 neighsnoopd.bpf.o: neighsnoopd.bpf.c neighsnoopd_shared.h
-	clang -O2 -g -target bpf -c neighsnoopd.bpf.c -o neighsnoopd.bpf.o -I/usr/include/x86_64-linux-gnu -I/usr/include/x86_64-linux-gnu/asm -I/usr/include/x86_64-linux-gnu/gnu
+	clang -Wall -O2 -g -target bpf -c neighsnoopd.bpf.c -o neighsnoopd.bpf.o -I/usr/include/x86_64-linux-gnu -I/usr/include/x86_64-linux-gnu/asm -I/usr/include/x86_64-linux-gnu/gnu
 
 neighsnoopd.bpf.skel.h: neighsnoopd.bpf.o
 	bpftool gen skeleton neighsnoopd.bpf.o > neighsnoopd.bpf.skel.h
@@ -22,7 +22,7 @@ $(VERSION_FILE):
 	@echo $(VERSION_DEFINE) > $(VERSION_FILE)
 
 neighsnoopd: neighsnoopd.bpf.skel.h neighsnoopd.c neighsnoopd.h neighsnoopd_shared.h $(VERSION_FILE)
-	gcc -Wall -o neighsnoopd neighsnoopd.c logging.c -lbpf -lmnl
+	gcc -g -Wall -o neighsnoopd neighsnoopd.c lib.c logging.c -lbpf -lmnl
 
 clean:
 	rm -f neighsnoopd.bpf.o neighsnoopd.bpf.skel.h neighsnoopd cscope.in.out cscope.out cscope.po.out $(VERSION_FILE)
