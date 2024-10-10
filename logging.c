@@ -16,6 +16,7 @@
 #include "neighsnoopd.h"
 
 extern struct env env;
+extern __u32 mnl_portid;
 
 void __pr_std(FILE * file, const char *format, ...)
 {
@@ -205,6 +206,7 @@ int pr_nl_link(const struct nlmsghdr *nlh)
 int pr_nl_attr_neigh(const struct nlattr *attr, void *data)
 {
     int type = mnl_attr_get_type(attr);
+    struct ndmsg *ndm = (struct ndmsg *)data;
     __u8 mac_str[MAC_ADDR_STR_LEN];
     char ip_str[INET6_ADDRSTRLEN];
 
@@ -216,7 +218,10 @@ int pr_nl_attr_neigh(const struct nlattr *attr, void *data)
             break;
         case NDA_DST:
             const unsigned char *addr = mnl_attr_get_payload(attr);
-            format_ip_address(ip_str, sizeof(ip_str), (struct in6_addr *)addr);
+            if (ndm->ndm_family == AF_INET)
+                inet_ntop(AF_INET, addr, ip_str, INET_ADDRSTRLEN);
+            else if (ndm->ndm_family == AF_INET6)
+                format_ip_address(ip_str, sizeof(ip_str), (struct in6_addr *)addr);
             __pr_nl(" <DST> IP: %s", ip_str);
             break;
         case NDA_LLADDR:
@@ -289,23 +294,27 @@ int pr_nl_neigh(const struct nlmsghdr *nlh)
     __pr_nl(">    .ndm_family = %d\n", ndm->ndm_family);
     __pr_nl(">    .ndm_ifindex = %d\n", ndm->ndm_ifindex);
     __pr_nl(">    .ndm_state = <");
-    unsigned states = nlh->nlmsg_flags;
+    unsigned states = ndm->ndm_state;
     while (states) {
         int bit_pos = __builtin_ctzll(states);
         int state = 1 << bit_pos;
-        if (state & NLM_F_REQUEST)
-            __pr_nl("REQUEST");
-        if (state & NLM_F_MULTI)
-            __pr_nl("MULTI");
-        if (state & NLM_F_ACK)
-            __pr_nl("ACK");
-        if (state & NLM_F_ECHO)
-            __pr_nl("ECHO");
-        if (state & NLM_F_DUMP_INTR)
-            __pr_nl("DUMP_INTR");
-        if (state & NLM_F_DUMP_FILTERED)
-            __pr_nl("DUMP_FILTERED");
-        if (state >= NLM_F_DUMP_FILTERED)
+        if (state & NUD_INCOMPLETE)
+            __pr_nl("INCOMPLETE");
+        if (state & NUD_REACHABLE)
+            __pr_nl("REACHABLE");
+        if (state & NUD_STALE)
+            __pr_nl("STALE");
+        if (state & NUD_DELAY)
+            __pr_nl("DELAY");
+        if (state & NUD_PROBE)
+            __pr_nl("PROBE");
+        if (state & NUD_FAILED)
+            __pr_nl("FAILED");
+        if (state & NUD_NOARP)
+            __pr_nl("NOARP");
+        if (state & NUD_PERMANENT)
+            __pr_nl("PERMANENT");
+        if (state > NUD_PERMANENT)
             __pr_nl("UNKNOWN(0x%x)", state);
         if (__builtin_popcountll(states) > 1)
             __pr_nl(",");
@@ -313,7 +322,7 @@ int pr_nl_neigh(const struct nlmsghdr *nlh)
     }
     __pr_nl(">\n");
     __pr_nl(">    .ndm_flags = %d <", ndm->ndm_flags);
-    unsigned flags = nlh->nlmsg_flags;
+    unsigned flags = ndm->ndm_flags;
     while (flags) {
         int bit_pos = __builtin_ctzll(flags);
         int flag = 1 << bit_pos;
@@ -343,7 +352,7 @@ int pr_nl_neigh(const struct nlmsghdr *nlh)
     __pr_nl(">\n");
     __pr_nl(">    .ndm_type = %d\n", ndm->ndm_type);
 
-    mnl_attr_parse(nlh, sizeof(*ndm), pr_nl_attr_neigh, NULL);
+    mnl_attr_parse(nlh, sizeof(*ndm), pr_nl_attr_neigh, ndm);
 
     return MNL_CB_OK;
 }
@@ -390,12 +399,9 @@ int pr_nl_ndm(const struct nlmsghdr *nlh)
     return MNL_CB_OK;
 }
 
-void pr_nl_nlmsg(struct nlmsghdr *nlh, __u32 seq)
+static int __pr_nl_nlmsg_cb(const struct nlmsghdr *nlh, void *data)
 {
     int ret;
-
-    if (!env.netlink)
-        return;
 
     __pr_nl(">----------- BEGIN NETLINK MESSAGE -----------\n");
     __pr_nl(">  [NETLINK Header ] %d octets\n", nlh->nlmsg_len);
@@ -449,7 +455,34 @@ void pr_nl_nlmsg(struct nlmsghdr *nlh, __u32 seq)
             __pr_nl("DUMP_INTR");
         if (flag & NLM_F_DUMP_FILTERED)
             __pr_nl("DUMP_FILTERED");
-        if (flag >= NLM_F_DUMP_FILTERED)
+        if (nlh->nlmsg_type == RTM_NEWNEIGH ||
+            nlh->nlmsg_type == RTM_NEWLINK ||
+            nlh->nlmsg_type == RTM_NEWADDR) {
+            if (flag & NLM_F_ROOT)
+                __pr_nl("ROOT");
+            if (flag & NLM_F_MATCH)
+                __pr_nl("MATCH");
+            if (flag & NLM_F_ATOMIC)
+                __pr_nl("ATOMIC");
+        } else if (nlh->nlmsg_type == RTM_GETNEIGH ||
+                   nlh->nlmsg_type == RTM_GETLINK ||
+                   nlh->nlmsg_type == RTM_GETADDR) {
+            if (flag & NLM_F_REPLACE)
+                __pr_nl("REPLACE");
+            if (flag & NLM_F_EXCL)
+                __pr_nl("EXCL");
+            if (flag & NLM_F_CREATE)
+                __pr_nl("CREATE");
+            if (flag & NLM_F_APPEND)
+                __pr_nl("APPEND");
+        } else if (nlh->nlmsg_type == RTM_DELNEIGH ||
+                   nlh->nlmsg_type == RTM_DELLINK ||
+                   nlh->nlmsg_type == RTM_DELADDR) {
+            if (flag & NLM_F_NONREC)
+                __pr_nl("NONREC");
+            if (flag & NLM_F_BULK)
+                __pr_nl("BULK");
+        } else if (flag >= NLM_F_DUMP_FILTERED)
             __pr_nl("UNKNOWN(0x%x)", flag);
         if (__builtin_popcountll(flags) > 1)
             __pr_nl(",");
@@ -467,7 +500,17 @@ void pr_nl_nlmsg(struct nlmsghdr *nlh, __u32 seq)
         ret = pr_nl_ndm(nlh);
     if (ret <= MNL_CB_ERROR) {
         pr_nl(">>>error parsing netlink message<<<\n");
-        return;
+        return MNL_CB_ERROR;
     }
     __pr_nl(">-----------  END NETLINK MESSAGE  -----------\n");
+    return MNL_CB_OK;
+}
+
+void pr_nl_nlmsg(struct nlmsghdr *nlh, size_t num_bytes)
+{
+    if (!env.netlink)
+        return;
+
+    mnl_cb_run(nlh, num_bytes, nlh->nlmsg_seq, mnl_portid,
+                     __pr_nl_nlmsg_cb, NULL);
 }
